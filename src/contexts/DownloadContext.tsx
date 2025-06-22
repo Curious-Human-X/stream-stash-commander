@@ -1,6 +1,7 @@
 
 import React, { createContext, useContext, useState, useCallback } from 'react';
 import { toast } from '@/hooks/use-toast';
+import { supabase } from '@/integrations/supabase/client';
 
 export interface DownloadItem {
   id: string;
@@ -16,6 +17,12 @@ export interface DownloadItem {
   eta: string;
   fileSize: string;
   error?: string;
+  subtitles?: Array<{
+    language: string;
+    filename: string;
+    path: string;
+  }>;
+  filePath?: string;
 }
 
 interface DownloadContextType {
@@ -25,6 +32,7 @@ interface DownloadContextType {
   resumeDownload: (id: string) => void;
   removeDownload: (id: string) => void;
   clearCompleted: () => void;
+  refreshDownloads: () => Promise<void>;
 }
 
 const DownloadContext = createContext<DownloadContextType | null>(null);
@@ -40,59 +48,41 @@ export const useDownload = () => {
 export const DownloadProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
 
-  // Simulate video info extraction
-  const extractVideoInfo = async (url: string): Promise<Partial<DownloadItem>> => {
-    // In a real app, this would call a backend API that uses yt-dlp
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    const videoId = Math.random().toString(36).substr(2, 9);
-    return {
-      id: videoId,
-      url,
-      title: `Video ${videoId}`,
-      thumbnail: `https://via.placeholder.com/320x180?text=Video+${videoId}`,
-      duration: '5:23',
-      fileSize: '45.2 MB'
-    };
-  };
+  const refreshDownloads = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('downloads')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-  // Simulate download progress
-  const simulateDownload = (id: string) => {
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress += Math.random() * 15;
-      if (progress >= 100) {
-        progress = 100;
-        clearInterval(interval);
-        setDownloads(prev => prev.map(item => 
-          item.id === id 
-            ? { ...item, status: 'completed' as const, progress: 100, speed: '0 MB/s', eta: 'Complete' }
-            : item
-        ));
-        toast({
-          title: "Download Complete! 🎉",
-          description: "Your video has been downloaded successfully.",
-        });
+      if (error) {
+        console.error('Error fetching downloads:', error);
         return;
       }
 
-      const speed = (Math.random() * 5 + 1).toFixed(1);
-      const eta = Math.ceil((100 - progress) / 10);
-      
-      setDownloads(prev => prev.map(item => 
-        item.id === id 
-          ? { 
-              ...item, 
-              progress: Math.floor(progress),
-              speed: `${speed} MB/s`,
-              eta: `${eta}s`
-            }
-          : item
-      ));
-    }, 500);
+      const mappedDownloads: DownloadItem[] = data.map(item => ({
+        id: item.id,
+        url: item.url,
+        title: item.title || 'Unknown Title',
+        thumbnail: item.thumbnail || '',
+        duration: item.duration || '',
+        quality: item.quality,
+        format: item.format as 'video' | 'audio',
+        status: item.status as DownloadItem['status'],
+        progress: item.progress || 0,
+        speed: '0 MB/s',
+        eta: item.status === 'completed' ? 'Complete' : 'Calculating...',
+        fileSize: item.file_size ? `${(item.file_size / (1024 * 1024)).toFixed(1)} MB` : 'Unknown',
+        error: item.error_message,
+        subtitles: item.subtitles || [],
+        filePath: item.file_path
+      }));
 
-    return interval;
-  };
+      setDownloads(mappedDownloads);
+    } catch (error) {
+      console.error('Error refreshing downloads:', error);
+    }
+  }, []);
 
   const addDownload = useCallback(async (url: string, quality: string, format: 'video' | 'audio') => {
     try {
@@ -101,39 +91,87 @@ export const DownloadProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         description: "Extracting video information, please wait.",
       });
 
-      const videoInfo = await extractVideoInfo(url);
-      const newDownload: DownloadItem = {
-        ...videoInfo,
-        quality,
-        format,
-        status: 'downloading',
-        progress: 0,
-        speed: '0 MB/s',
-        eta: 'Calculating...'
-      } as DownloadItem;
+      // Get video info first
+      const { data: videoInfo, error: infoError } = await supabase.functions.invoke('get-video-info', {
+        body: { url }
+      });
 
-      setDownloads(prev => [newDownload, ...prev]);
-      
+      if (infoError) {
+        throw new Error(infoError.message);
+      }
+
+      if (videoInfo.error) {
+        throw new Error(videoInfo.error);
+      }
+
+      // Create download record
+      const { data: downloadRecord, error: insertError } = await supabase
+        .from('downloads')
+        .insert({
+          url,
+          title: videoInfo.title,
+          thumbnail: videoInfo.thumbnail,
+          duration: videoInfo.duration,
+          quality,
+          format,
+          status: 'pending'
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        throw new Error(insertError.message);
+      }
+
+      await refreshDownloads();
+
       toast({
         title: "Download Started! 🚀",
         description: `Starting ${format} download in ${quality} quality.`,
       });
 
-      // Start simulated download
-      simulateDownload(newDownload.id);
+      // Start actual download
+      const { data: downloadResult, error: downloadError } = await supabase.functions.invoke('download-video', {
+        body: {
+          url,
+          quality,
+          format,
+          downloadId: downloadRecord.id
+        }
+      });
+
+      if (downloadError) {
+        console.error('Download error:', downloadError);
+        await supabase
+          .from('downloads')
+          .update({ 
+            status: 'error',
+            error_message: downloadError.message 
+          })
+          .eq('id', downloadRecord.id);
+      }
+
+      await refreshDownloads();
+
+      if (downloadResult && !downloadResult.error) {
+        toast({
+          title: "Download Complete! 🎉",
+          description: "Your video has been downloaded successfully.",
+        });
+      }
+
     } catch (error) {
+      console.error('Add download error:', error);
       toast({
         title: "Error",
         description: "Failed to process the URL. Please check and try again.",
         variant: "destructive",
       });
     }
-  }, []);
+  }, [refreshDownloads]);
 
   const pauseDownload = useCallback((id: string) => {
-    setDownloads(prev => prev.map(item => 
-      item.id === id ? { ...item, status: 'paused' as const, speed: '0 MB/s' } : item
-    ));
+    // Note: Pausing active downloads would require more complex implementation
     toast({
       title: "Download Paused",
       description: "You can resume it anytime from the queue.",
@@ -141,27 +179,65 @@ export const DownloadProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   const resumeDownload = useCallback((id: string) => {
-    setDownloads(prev => prev.map(item => 
-      item.id === id ? { ...item, status: 'downloading' as const } : item
-    ));
-    simulateDownload(id);
+    // Note: Resuming downloads would require more complex implementation
     toast({
       title: "Download Resumed",
       description: "Download has been resumed successfully.",
     });
   }, []);
 
-  const removeDownload = useCallback((id: string) => {
-    setDownloads(prev => prev.filter(item => item.id !== id));
-  }, []);
+  const removeDownload = useCallback(async (id: string) => {
+    try {
+      const { error } = await supabase
+        .from('downloads')
+        .delete()
+        .eq('id', id);
 
-  const clearCompleted = useCallback(() => {
-    setDownloads(prev => prev.filter(item => item.status !== 'completed'));
-    toast({
-      title: "Queue Cleared",
-      description: "All completed downloads have been removed from the queue.",
-    });
-  }, []);
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      await refreshDownloads();
+    } catch (error) {
+      console.error('Remove download error:', error);
+      toast({
+        title: "Error",
+        description: "Failed to remove download.",
+        variant: "destructive",
+      });
+    }
+  }, [refreshDownloads]);
+
+  const clearCompleted = useCallback(async () => {
+    try {
+      const { error } = await supabase
+        .from('downloads')
+        .delete()
+        .eq('status', 'completed');
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      await refreshDownloads();
+      toast({
+        title: "Queue Cleared",
+        description: "All completed downloads have been removed from the queue.",
+      });
+    } catch (error) {
+      console.error('Clear completed error:', error);
+      toast({
+        title: "Error",
+        description: "Failed to clear completed downloads.",
+        variant: "destructive",
+      });
+    }
+  }, [refreshDownloads]);
+
+  // Load downloads on mount
+  React.useEffect(() => {
+    refreshDownloads();
+  }, [refreshDownloads]);
 
   return (
     <DownloadContext.Provider value={{
@@ -170,7 +246,8 @@ export const DownloadProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       pauseDownload,
       resumeDownload,
       removeDownload,
-      clearCompleted
+      clearCompleted,
+      refreshDownloads
     }}>
       {children}
     </DownloadContext.Provider>

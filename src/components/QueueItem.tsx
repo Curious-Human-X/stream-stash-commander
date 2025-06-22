@@ -3,7 +3,8 @@ import React from 'react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { useDownload, DownloadItem } from '@/contexts/DownloadContext';
-import { Play, Pause, Trash2, Download, Music, Video, AlertCircle, CheckCircle } from 'lucide-react';
+import { Play, Pause, Trash2, Download, Music, Video, AlertCircle, CheckCircle, Subtitles, ExternalLink } from 'lucide-react';
+import { supabase } from '@/integrations/supabase/client';
 
 interface QueueItemProps {
   download: DownloadItem;
@@ -42,21 +43,39 @@ export const QueueItem: React.FC<QueueItemProps> = ({ download }) => {
     }
   };
 
+  const handleDownloadFile = async () => {
+    if (!download.filePath) return;
+
+    try {
+      const { data } = supabase.storage
+        .from('downloads')
+        .getPublicUrl(download.filePath);
+      
+      if (data.publicUrl) {
+        window.open(data.publicUrl, '_blank');
+      }
+    } catch (error) {
+      console.error('Error downloading file:', error);
+    }
+  };
+
   return (
     <div className="bg-gray-50 dark:bg-gray-900/50 rounded-xl p-4 border border-gray-200 dark:border-gray-700">
       <div className="flex gap-4">
         {/* Thumbnail */}
         <div className="flex-shrink-0">
           <div className="w-20 h-12 bg-gray-200 dark:bg-gray-700 rounded-lg overflow-hidden relative">
-            <img 
-              src={download.thumbnail} 
-              alt={download.title}
-              className="w-full h-full object-cover"
-              onError={(e) => {
-                const target = e.target as HTMLImageElement;
-                target.style.display = 'none';
-              }}
-            />
+            {download.thumbnail && (
+              <img 
+                src={download.thumbnail} 
+                alt={download.title}
+                className="w-full h-full object-cover"
+                onError={(e) => {
+                  const target = e.target as HTMLImageElement;
+                  target.style.display = 'none';
+                }}
+              />
+            )}
             <div className="absolute inset-0 flex items-center justify-center">
               {download.format === 'audio' ? (
                 <Music className="h-6 w-6 text-purple-500" />
@@ -84,11 +103,32 @@ export const QueueItem: React.FC<QueueItemProps> = ({ download }) => {
                 <span className="text-xs text-gray-500 dark:text-gray-400">
                   {download.quality} • {download.format === 'audio' ? 'MP3' : 'MP4'}
                 </span>
+                {download.subtitles && download.subtitles.length > 0 && (
+                  <>
+                    <span className="text-xs text-gray-500 dark:text-gray-400">•</span>
+                    <div className="flex items-center gap-1">
+                      <Subtitles className="h-3 w-3 text-purple-500" />
+                      <span className="text-xs text-purple-600 dark:text-purple-400">
+                        {download.subtitles.length} subtitles
+                      </span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
             {/* Actions */}
             <div className="flex items-center gap-1 ml-2">
+              {download.status === 'completed' && download.filePath && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleDownloadFile}
+                  className="h-8 w-8 p-0 text-green-600 hover:text-green-700"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                </Button>
+              )}
               {download.status === 'downloading' && (
                 <Button
                   variant="ghost"
@@ -143,6 +183,22 @@ export const QueueItem: React.FC<QueueItemProps> = ({ download }) => {
               <span className="font-medium">{download.progress}%</span>
             )}
           </div>
+
+          {/* Subtitles List */}
+          {download.subtitles && download.subtitles.length > 0 && download.status === 'completed' && (
+            <div className="mt-2 text-xs">
+              <div className="flex flex-wrap gap-1">
+                {download.subtitles.map((subtitle, index) => (
+                  <span 
+                    key={index}
+                    className="inline-flex items-center px-2 py-1 rounded bg-purple-100 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300"
+                  >
+                    {subtitle.language}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Error Message */}
           {download.status === 'error' && download.error && (
